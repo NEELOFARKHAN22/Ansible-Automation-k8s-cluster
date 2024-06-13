@@ -2,6 +2,8 @@
 - name: Launch EC2 instances and setup k3s cluster
   hosts: localhost
   gather_facts: False
+  vars:
+      ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
   tasks:
     - name: Create VPC
       amazon.aws.ec2_vpc_net:
@@ -99,7 +101,7 @@
         rules:
           - proto: tcp
             ports:
-              - 6443
+              - 22
             cidr_ip: 0.0.0.0/0
 
     - name: Launch master instance
@@ -149,10 +151,11 @@
     - name: Wait for SSH to be available on master instance
       wait_for:
         host: "{{ master_instance.instances[0].public_ip_address }}"
+     #   host: "{{  item.public_dns_name  }}"
         port: 22
         timeout: 300
         delay: 10
-
+      with_items: "{{ master_instance.instances }}"
     - name: Wait for SSH to be available on worker instances
       wait_for:
         host: "{{ item.public_ip_address }}"
@@ -165,28 +168,42 @@
       add_host:
         name: master
         ansible_host: "{{ master_instance.instances[0].public_ip_address }}"
-        ansible_user: ubuntu
-        ansible_ssh_private_key_file: /home/ubuntu/keys
+        ansible_user: ec2-user
+        ansible_ssh_private_key_file: /home/ubuntu/ansible.pem
         group: k3s_master
-
+      with_items: "{{ master_instance.instances  }}"
     - name: Add worker instances to inventory
       add_host:
         name: "{{ item.instance_id }}"
         ansible_host: "{{ item.public_ip_address }}"
         ansible_user: ubuntu
-        ansible_ssh_private_key_file: /home/ubuntu/keys
+        ansible_ssh_private_key_file: /home/ubuntu/ansible.pem
         group: k3s_worker
       with_items: "{{ worker_instances.instances }}"
 
 - name: Set up k3s cluster
   hosts: k3s_master
+  vars:
+      ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
   become: yes
   tasks:
     - name: Install k3s on master
+      #command: getenforce
+      #register: selinux_status
       shell: curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 644
       args:
         creates: /usr/local/bin/k3s
 
+    - name: Install container-selinux package
+      when: selinux_status.stdout != "Disabled"
+      ansible.builtin.yum:
+        name: container-selinux
+        state: present
+    - name: Install k3s-selinux policy package
+      when: selinux_status.stdout != "Disabled"
+      ansible.builtin.yum:
+        name: https://rpm.rancher.io/k3s/stable/common/centos/8/noarch/k3s-selinux-0.2-1.el8.noarch.rpm
+        state: present
     - name: Get k3s join token
       shell: cat /var/lib/rancher/k3s/server/node-token
       register: k3s_token
