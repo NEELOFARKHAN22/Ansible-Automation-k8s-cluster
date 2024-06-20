@@ -59,18 +59,27 @@
             cidr_ip: 0.0.0.0/0
           - proto: tcp
             ports:
-              - 443
+              - 8080
             cidr_ip: 0.0.0.0/0
           - proto: tcp
             ports:
               - 6443
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            ports:
+              - 32000  # Grafana NodePort
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            ports:
+              - 9090  # Prometheus NodePort
+              - 30000
             cidr_ip: 0.0.0.0/0
       register: security_group
 
     - name: Launch master instance
       amazon.aws.ec2_instance:
         key_name: ansible
-        instance_type: t2.small
+        instance_type: t2.medium
         image_id: ami-0e001c9271cf7f3b9  # Replace with your AMI ID
         wait: yes
         count: 1
@@ -85,7 +94,7 @@
     - name: Launch worker instance
       amazon.aws.ec2_instance:
         key_name: ansible
-        instance_type: t3.micro
+        instance_type: t3.medium
         image_id: ami-0e001c9271cf7f3b9  # Replace with your AMI ID
         wait: yes
         count: 1
@@ -221,3 +230,94 @@
       shell: kubectl apply -f /tmp/react-app-service.yml
       args:
         chdir: /tmp/
+
+- name: Deploy Prometheus and Grafana using Helm
+  hosts: k3s_master
+  become: yes
+  tasks:
+    - name: Disable UFW (Uncomplicated Firewall)
+      shell: |
+        sudo ufw disable || true
+
+    - name: Install Helm if not already installed
+      shell: |
+        if ! command -v helm &> /dev/null; then
+          curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
+        fi
+
+    - name: Add Helm repo and update
+      shell: |
+        helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+        helm repo add grafana https://grafana.github.io/helm-charts
+        helm repo update
+
+    - name: Create namespace for monitoring
+      shell: kubectl create namespace monitoring || true
+
+    - name: Install Prometheus using Helm
+      shell: |
+        export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+        helm install prometheus prometheus-community/kube-prometheus-stack --namespace monitoring --wait --timeout 10m
+
+    - name: Install Grafana using Helm with increased timeout
+      shell: |
+        export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+        helm install grafana grafana/grafana --namespace monitoring --set adminPassword=admin --timeout 10m --wait
+
+    - name: Check Prometheus Pods status
+      shell: kubectl get pods -n monitoring -l app.kubernetes.io/name=kube-prometheus-stack -o jsonpath='{.items[*].status.phase}'
+      register: prometheus_pod_status
+
+    - name: Print Prometheus Pods status
+      debug:
+        msg: "Prometheus Pods status: {{ prometheus_pod_status.stdout }}"
+
+    - name: Get detailed status of Prometheus pods
+      shell: kubectl get pods -n monitoring -l app.kubernetes.io/name=kube-prometheus-stack -o wide
+      register: prometheus_pods_detail
+
+    - name: Print detailed status of Prometheus pods
+      debug:
+        msg: "{{ prometheus_pods_detail.stdout_lines }}"
+
+    - name: Get Prometheus pod logs (if any pod is not running)
+      shell: kubectl logs -n monitoring -l app.kubernetes.io/name=kube-prometheus-stack --tail=100
+      register: prometheus_pods_logs
+      when: "'Running' not in prometheus_pod_status.stdout"
+
+    - name: Print Prometheus pod logs
+      debug:
+        msg: "{{ prometheus_pods_logs.stdout_lines }}"
+      when: "'Running' not in prometheus_pod_status.stdout"
+
+    - name: Get events in monitoring namespace
+      shell: kubectl get events -n monitoring --sort-by='.lastTimestamp'
+      register: monitoring_namespace_events
+
+    - name: Print events in monitoring namespace
+      debug:
+        msg: "{{ monitoring_namespace_events.stdout_lines }}"
+
+    - name: Verify Grafana Pods are running
+      shell: kubectl get pods -n monitoring -l app.kubernetes.io/name=grafana -o jsonpath='{.items[*].status.phase}'
+      register: grafana_pod_status
+
+    - name: Print Grafana Pods status
+      debug:
+        msg: "Grafana Pods status: {{ grafana_pod_status.stdout }}"
+
+    - name: Get Grafana admin password
+      shell: kubectl get secret --namespace monitoring grafana -o jsonpath="{.data.admin-password}" | base64 --decode
+      register: grafana_admin_password
+
+    - name: Print Grafana admin password
+      debug:
+        msg: "Grafana admin password is: {{ grafana_admin_password.stdout }}"
+
+    - name: Get Grafana service NodePort
+      shell: kubectl get svc -n monitoring grafana -o jsonpath='{.spec.ports[0].nodePort}'
+      register: grafana_node_port
+
+    - name: Print Grafana access information
+      debug:
+        msg: "Grafana is accessible at: http://{{ ansible_host }}:{{ grafana_node_port.stdout }} with username 'admin' and password '{{ grafana_admin_password.stdout }}'"
