@@ -51,19 +51,19 @@
         rules:
           - proto: tcp
             ports:
-              - 22
+              - 22  # SSH
             cidr_ip: 0.0.0.0/0
           - proto: tcp
             ports:
-              - 80
+              - 80  # HTTP for any web server
             cidr_ip: 0.0.0.0/0
           - proto: tcp
             ports:
-              - 8080
+              - 8080  # General application port
             cidr_ip: 0.0.0.0/0
           - proto: tcp
             ports:
-              - 6443
+              - 6443  # Kubernetes API server
             cidr_ip: 0.0.0.0/0
           - proto: tcp
             ports:
@@ -71,8 +71,11 @@
             cidr_ip: 0.0.0.0/0
           - proto: tcp
             ports:
-              - 9090  # Prometheus NodePort
-              - 30000
+              - 30090  # Prometheus NodePort
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            ports:
+              - 30000  # React App NodePort
             cidr_ip: 0.0.0.0/0
       register: security_group
 
@@ -263,6 +266,14 @@
       shell: |
         export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
         helm install grafana grafana/grafana --namespace monitoring --set adminPassword=admin --timeout 10m --wait
+
+    - name: Patch Prometheus service to NodePort
+      shell: |
+        kubectl patch svc prometheus-kube-prometheus-prometheus -n monitoring -p '{"spec": {"type": "NodePort", "ports": [{"port": 9090, "targetPort": 9090, "nodePort": 30090}]}}'
+
+    - name: Patch Grafana service to NodePort
+      shell: |
+        kubectl patch svc grafana -n monitoring -p '{"spec": {"type": "NodePort", "ports": [{"port": 80, "targetPort": 3000, "nodePort": 32000}]}}'
 
     - name: Check Prometheus Pods status
       shell: kubectl get pods -n monitoring -l app.kubernetes.io/name=kube-prometheus-stack -o jsonpath='{.items[*].status.phase}'
