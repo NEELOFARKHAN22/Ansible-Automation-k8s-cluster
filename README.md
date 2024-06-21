@@ -429,3 +429,24 @@ The `ec2.py` script performs the following tasks:
    - Groups instances under `k3s_master` and `k3s_worker` with their respective public IPs.
    - Assigns SSH credentials (`ubuntu` user and path to `ansible.pem` SSH private key file) to each group.
    - Includes detailed metadata (`private_ip`, `instance_id`, `tags`) under `_meta` for each instance.
+     
+## **Configure Ansible Dynamic-inventory**
+
+1. **Edit `playbook.yml` File**
+
+   To configure Ansible settings for your project, follow these steps to edit the `playbook.yml` file:
+
+   - **Navigate to the Ansible Configuration Directory:**
+     ```bash
+     cd /etc/ansible
+     ```
+     This command changes the current directory to where Ansible's global configuration files are stored.
+
+   - **Edit `playbook.yml` File:**
+     ```bash
+     sudo nano playbook.yml
+     ```
+     Use your preferred text editor (e.g., `nano`, `vim`) with administrative privileges (`sudo`) to open the `ansible.cfg` file.
+
+   - **Add the Following Configurations:**
+     ``
