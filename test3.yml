@@ -1,0 +1,250 @@
+---
+- name: Launch EC2 instances and create infrastructure
+  hosts: localhost
+  gather_facts: False
+  tasks:
+    - name: Create VPC
+      amazon.aws.ec2_vpc_net:
+        name: k3s-vpc
+        cidr_block: 10.0.0.0/16
+        region: us-east-1
+      register: vpc
+
+    - name: Create Internet Gateway for VPC
+      amazon.aws.ec2_vpc_igw:
+        vpc_id: "{{ vpc.vpc.id }}"
+        region: us-east-1
+        state: present
+      register: igw_info
+
+    - name: Create subnet
+      amazon.aws.ec2_vpc_subnet:
+        vpc_id: "{{ vpc.vpc.id }}"
+        cidr: 10.0.1.0/24
+        az: us-east-1a
+        state: present
+        region: us-east-1
+        map_public: True
+        tags:
+          Name: vpc-subnet
+      register: subnet
+
+    - name: Create VPC Subnet Route Table
+      amazon.aws.ec2_vpc_route_table:
+        vpc_id: "{{ vpc.vpc.id }}"
+        region: us-east-1
+        state: present
+        subnets:
+          - "{{ subnet.subnet.id }}"
+        tags:
+          Name: route-table-for-subnet
+        routes:
+          - dest: 0.0.0.0/0
+            gateway_id: "{{ igw_info.gateway_id }}"
+
+    - name: Create security group
+      amazon.aws.ec2_group:
+        name: k3s-sg
+        description: k3s security group
+        vpc_id: "{{ vpc.vpc.id }}"
+        region: us-east-1
+        rules:
+          - proto: tcp
+            ports:
+              - 22  # SSH
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            ports:
+              - 80  # HTTP for any web server
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            ports:
+              - 8080  # General application port
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            ports:
+              - 6443  # Kubernetes API server
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            ports:
+              - 32000  # Grafana NodePort
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            ports:
+              - 30090  # Prometheus NodePort
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            ports:
+              - 30000  # React App NodePort
+            cidr_ip: 0.0.0.0/0
+      register: security_group
+
+    - name: Launch master instance
+      amazon.aws.ec2_instance:
+        key_name: ansible
+        instance_type: t2.medium
+        image_id: ami-0e001c9271cf7f3b9  # Replace with your AMI ID
+        wait: yes
+        count: 1
+        region: us-east-1
+        tags:
+          Name: k3s-master
+        vpc_subnet_id: "{{ subnet.subnet.id }}"
+        security_groups:
+          - "{{ security_group.group_id }}"
+      register: master_instance
+
+    - name: Launch worker instance
+      amazon.aws.ec2_instance:
+        key_name: ansible
+        instance_type: t3.medium
+        image_id: ami-0e001c9271cf7f3b9  # Replace with your AMI ID
+        wait: yes
+        count: 1
+        region: us-east-1
+        tags:
+          Name: k3s-worker
+        vpc_subnet_id: "{{ subnet.subnet.id }}"
+        security_groups:
+          - "{{ security_group.group_id }}"
+      register: worker_instance
+
+    - name: Debug master instance information
+      debug:
+        var: master_instance
+
+    - name: Debug worker instance information
+      debug:
+        var: worker_instance
+
+    - name: Wait for SSH to be available on master instance
+      wait_for:
+        host: "{{ master_instance.instances[0].public_ip_address | default(master_instance.instances[0].public_dns_name) }}"
+        port: 22
+        timeout: 300
+        delay: 10
+
+    - name: Wait for SSH to be available on worker instance
+      wait_for:
+        host: "{{ worker_instance.instances[0].public_ip_address | default(worker_instance.instances[0].public_dns_name) }}"
+        port: 22
+        timeout: 300
+        delay: 10
+
+    - name: Add master instance to inventory
+      add_host:
+        name: master
+        ansible_host: "{{ master_instance.instances[0].public_ip_address | default(master_instance.instances[0].public_dns_name) }}"
+        ansible_user: ubuntu
+        ansible_ssh_private_key_file: /home/ubuntu/ansible.pem
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+        groups: k3s_master
+
+    - name: Add worker instance to inventory
+      add_host:
+        name: worker
+        ansible_host: "{{ worker_instance.instances[0].public_ip_address | default(worker_instance.instances[0].public_dns_name) }}"
+        ansible_user: ubuntu
+        ansible_ssh_private_key_file: /home/ubuntu/ansible.pem
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+        groups: k3s_worker
+
+- name: Set up K3s master and worker nodes
+  hosts: k3s_master:k3s_worker
+  become: yes
+  vars:
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install k3s on master and worker nodes
+      shell: curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--write-kubeconfig-mode 644" sh -
+      args:
+        creates: /usr/local/bin/k3s
+
+    - name: Get k3s join token
+      shell: cat /var/lib/rancher/k3s/server/node-token
+      when: inventory_hostname == "master"
+      register: k3s_token
+      ignore_errors: yes  # Ignore errors to prevent playbook failure
+
+    - name: Save k3s join token to local
+      local_action:
+        module: copy
+        content: "{{ k3s_token.stdout }}"
+        dest: ./node-token
+      when: k3s_token is defined and k3s_token.stdout is defined
+
+    - name: Copy k3s join token to worker nodes
+      copy:
+        src: ./node-token
+        dest: /tmp/node-token
+      when: inventory_hostname == "worker" and k3s_token.stdout is defined
+
+    - name: Join worker nodes to the master
+      shell: curl -sfL https://get.k3s.io | K3S_URL=https://{{ hostvars['master']['ansible_host'] }}:6443 K3S_TOKEN=$(cat /tmp/node-token) sh -
+      when: inventory_hostname == "worker" and k3s_token.stdout is defined
+
+- name: Deploy React app using DaemonSet on both master and worker nodes
+  hosts: k3s_master:k3s_worker
+  vars:
+    react_app_image: "sanjaysaini2000/react-app:latest"
+  tasks:
+    - name: Create DaemonSet manifest for React app
+      copy:
+        content: |
+          apiVersion: apps/v1
+          kind: DaemonSet
+          metadata:
+            name: react-app
+            labels:
+              app: react-app
+          spec:
+            selector:
+              matchLabels:
+                app: react-app
+            template:
+              metadata:
+                labels:
+                  app: react-app
+              spec:
+                containers:
+                - name: react-app
+                  image: "{{ react_app_image }}"
+                  ports:
+                  - containerPort: 80
+                    name: http
+                    protocol: TCP
+                  env:
+                  - name: NODE_ENV
+                    value: "production"
+        dest: /tmp/react-app-daemonset.yml
+
+    - name: Apply DaemonSet manifest for React app
+      shell: kubectl apply -f /tmp/react-app-daemonset.yml
+      args:
+        chdir: /tmp/
+
+    - name: Create service manifest for React app
+      copy:
+        content: |
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: react-app-service
+          spec:
+            type: NodePort
+            ports:
+            - port: 80
+              targetPort: http
+              nodePort: 30000
+            selector:
+              app: react-app
+        dest: /tmp/react-app-service.yml
+
+    - name: Apply service manifest for React app
+      shell: kubectl apply -f /tmp/react-app-service.yml
+      args:
+        chdir: /tmp/
