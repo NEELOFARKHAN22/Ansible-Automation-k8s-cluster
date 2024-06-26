@@ -464,599 +464,561 @@ The `ec2.py` script performs the following tasks:
 
    - **Add the Following Configurations:**
      ```
+       ---
         - name: Launch EC2 instances and create infrastructure
-        # This playbook is named "Launch EC2 instances and create infrastructure."
-        # It defines a series of tasks to set up an AWS environment including creating a VPC and launching EC2 instances.
-        hosts: localhost
-        # The playbook will run locally on the machine executing the script. 
-        # It won't connect to any remote hosts initially since infrastructure needs to be set up first.
-        gather_facts: False
-        # No need to gather facts about the local system because we are just creating resources in AWS, not interacting with the local machine.
-      
-        tasks:
-          - name: Create VPC
-            # This task is called "Create VPC."
-            # It will set up a Virtual Private Cloud (VPC) in AWS, which is a logically isolated network for our AWS resources.
-            amazon.aws.ec2_vpc_net:
-              # We use the `ec2_vpc_net` module from Ansible's AWS collection to manage VPCs.
-              name: k3s-vpc
-              # The VPC will be named "k3s-vpc" for identification purposes.
-              cidr_block: 10.0.0.0/16
-              # We define the CIDR block for the VPC as "10.0.0.0/16", 
-              # which specifies the IP address range that the VPC will use. It allows for 65,536 IP addresses.
-              region: us-east-1
-              # We specify the region where the VPC will be created, which is "us-east-1" (Northern Virginia).
-      
-            register: vpc
-            # The result of this task, which includes details about the created VPC (like its ID), 
-            # will be stored in a variable named `vpc` for later use in the playbook.
-      
-      
-          - name: Create Internet Gateway for VPC
-        # Task to create an Internet Gateway for the VPC, allowing internet access.
-        amazon.aws.ec2_vpc_igw:
-          vpc_id: "{{ vpc.vpc.id }}"
-          # Associates the Internet Gateway with the created VPC using its ID.
-          region: us-east-1
-          # Specifies the AWS region where the gateway will be created.
-          state: present
-          # Ensures that the Internet Gateway is present (created).
-      
-        register: igw_info
-        # Stores the result of this task, including the Internet Gateway ID, in the variable `igw_info`.
-      
-      - name: Create subnet
-        # Task to create a subnet within the VPC, defining a smaller network range.
-        amazon.aws.ec2_vpc_subnet:
-          vpc_id: "{{ vpc.vpc.id }}"
-          # Associates the subnet with the created VPC using its ID.
-          cidr: 10.0.1.0/24
-          # Specifies the IP address range for the subnet, allowing 256 addresses.
-          az: us-east-1a
-          # Places the subnet in a specific availability zone within the region.
-          state: present
-          # Ensures the subnet is present (created).
-          region: us-east-1
-          # Specifies the AWS region where the subnet will be created.
-          map_public: True
-          # Indicates that this subnet is public, allowing external internet access.
-          tags:
-            Name: vpc-subnet
-            # Tags the subnet with the name "vpc-subnet" for identification.
-      
-        register: subnet
-        # Stores the result of this task, including the subnet ID, in the variable `subnet`.
-      
-      - name: Create VPC Subnet Route Table
-        # Task to create a route table for the subnet, defining how network traffic is directed.
-        amazon.aws.ec2_vpc_route_table:
-          vpc_id: "{{ vpc.vpc.id }}"
-          # Associates the route table with the created VPC using its ID.
-          region: us-east-1
-          # Specifies the AWS region where the route table will be created.
-          state: present
-          # Ensures the route table is present (created).
-          subnets:
-            - "{{ subnet.subnet.id }}"
-            # Links the subnet to this route table using its ID.
-          tags:
-            Name: route-table-for-subnet
-            # Tags the route table with the name "route-table-for-subnet" for identification.
-          routes:
-            - dest: 0.0.0.0/0
-              # Defines a route to any destination (0.0.0.0/0), meaning all outbound traffic.
-              gateway_id: "{{ igw_info.gateway_id }}"
-              # Routes traffic through the Internet Gateway using its ID from `igw_info`.
-      
-      - name: Create security group
-        # Task to create a security group, defining allowed network traffic rules.
-        amazon.aws.ec2_group:
-          name: k3s-sg
-          # Names the security group "k3s-sg."
-          description: k3s security group
-          # Provides a description for the security group.
-          vpc_id: "{{ vpc.vpc.id }}"
-          # Associates the security group with the created VPC using its ID.
-          region: us-east-1
-          # Specifies the AWS region where the security group will be created.
-          rules:
-            - proto: tcp
-              # Allows traffic over the TCP protocol.
-              ports:
-                - 22  # SSH
-                # Allows SSH traffic on port 22 from any IP.
-              cidr_ip: 0.0.0.0/0
-              # Allows connections from any IP address (0.0.0.0/0).
-      
-            - proto: tcp
-              ports:
-                - 80  # HTTP for any web server
-                # Allows HTTP traffic on port 80 from any IP.
-              cidr_ip: 0.0.0.0/0
-              # Allows connections from any IP address.
-      
-            - proto: tcp
-              ports:
-                - 8080  # General application port
-                # Allows traffic on port 8080 from any IP.
-              cidr_ip: 0.0.0.0/0
-              # Allows connections from any IP address.
-      
-            - proto: tcp
-              ports:
-                - 6443  # Kubernetes API server
-                # Allows Kubernetes API server traffic on port 6443 from any IP.
-              cidr_ip: 0.0.0.0/0
-              # Allows connections from any IP address.
-      
-            - proto: tcp
-              ports:
-                - 32000  # Grafana NodePort
-                # Allows Grafana traffic on port 32000 from any IP.
-              cidr_ip: 0.0.0.0/0
-              # Allows connections from any IP address.
-      
-            - proto: tcp
-              ports:
-                - 30090  # Prometheus NodePort
-                # Allows Prometheus traffic on port 30090 from any IP.
-              cidr_ip: 0.0.0.0/0
-              # Allows connections from any IP address.
-      
-            - proto: tcp
-              ports:
-                - 30000  # React App NodePort
-                # Allows traffic for the React App on port 30000 from any IP.
-              cidr_ip: 0.0.0.0/0
-              # Allows connections from any IP address.
-      
-        register: security_group
-        # Stores the result of this task, including the security group ID, in the variable `security_group`.
-      
-      
-         - name: Launch master instance
-        # Task to create the master EC2 instance for the K3s cluster.
-        amazon.aws.ec2_instance:
-          key_name: ansible
-          # Specifies the SSH key pair named "ansible" for accessing the instance.
-          instance_type: t2.medium
-          # Chooses the instance type, "t2.medium", which defines the hardware and performance capacity.
-          image_id: ami-0e001c9271cf7f3b9  # Replace with your AMI ID
-          # Specifies the Amazon Machine Image (AMI) ID to use for the instance (replace with your actual AMI ID).
-          wait: yes
-          # Waits until the instance is running and accessible before proceeding.
-          count: 1
-          # Launches one instance.
-          region: us-east-1
-          # Specifies the AWS region where the instance will be launched.
-          tags:
-            Name: k3s-master
-            # Tags the instance with the name "k3s-master" for identification.
-          vpc_subnet_id: "{{ subnet.subnet.id }}"
-          # Places the instance in the specified subnet by its ID.
-          security_groups:
-            - "{{ security_group.group_id }}"
-            # Attaches the previously created security group to the instance, controlling its network access.
-      
-        register: master_instance
-        # Saves the details of the created master instance (like its ID and public IP) in the variable `master_instance`.
-      
-      - name: Launch worker instance
-        # Task to create the worker EC2 instance for the K3s cluster.
-        amazon.aws.ec2_instance:
-          key_name: ansible
-          # Specifies the SSH key pair named "ansible" for accessing the instance.
-          instance_type: t3.medium
-          # Chooses the instance type, "t3.medium", which defines the hardware and performance capacity.
-          image_id: ami-0e001c9271cf7f3b9  # Replace with your AMI ID
-          # Specifies the Amazon Machine Image (AMI) ID to use for the instance (replace with your actual AMI ID).
-          wait: yes
-          # Waits until the instance is running and accessible before proceeding.
-          count: 1
-          # Launches one instance.
-          region: us-east-1
-          # Specifies the AWS region where the instance will be launched.
-          tags:
-            Name: k3s-worker
-            # Tags the instance with the name "k3s-worker" for identification.
-          vpc_subnet_id: "{{ subnet.subnet.id }}"
-          # Places the instance in the specified subnet by its ID.
-          security_groups:
-            - "{{ security_group.group_id }}"
-            # Attaches the previously created security group to the instance, controlling its network access.
-      
-        register: worker_instance
-        # Saves the details of the created worker instance (like its ID and public IP) in the variable `worker_instance`.
-      
-         - name: Wait for SSH to be available on master instance
-        # Ensures the SSH service on the master instance is ready to accept connections.
-        wait_for:
-          host: "{{ master_instance.instances[0].public_ip_address }}"
-          # Checks the master instance using its public IP address.
-          port: 22
-          # The port for SSH connections.
-          timeout: 300
-          # Waits for up to 300 seconds for SSH to become available.
-          delay: 10
-          # Starts checking after an initial delay of 10 seconds.
-      
-      - name: Wait for SSH to be available on worker instance
-        # Ensures the SSH service on the worker instance is ready to accept connections.
-        wait_for:
-          host: "{{ worker_instance.instances[0].public_ip_address }}"
-          # Checks the worker instance using its public IP address.
-          port: 22
-          # The port for SSH connections.
-          timeout: 300
-          # Waits for up to 300 seconds for SSH to become available.
-          delay: 10
-          # Starts checking after an initial delay of 10 seconds.
-      
-      - name: Add master instance to inventory
-        # Adds the master instance to the Ansible inventory for future tasks.
-        add_host:
-          name: master
-          # Assigns the name "master" to this instance in the inventory.
-          ansible_host: "{{ master_instance.instances[0].public_ip_address }}"
-          # Sets the public IP address of the master instance as its Ansible host.
-          ansible_user: ubuntu
-          # Specifies the SSH user to use for connecting to the instance.
-          ansible_ssh_private_key_file: /home/ubuntu/ansible.pem
-          # Provides the path to the private key for SSH authentication.
-          groups: k3s_master
-          # Adds this instance to the "k3s_master" group for grouping purposes.
-      
-      - name: Add worker instance to inventory
-        # Adds the worker instance to the Ansible inventory for future tasks.
-        add_host:
-          name: worker
-          # Assigns the name "worker" to this instance in the inventory.
-          ansible_host: "{{ worker_instance.instances[0].public_ip_address }}"
-          # Sets the public IP address of the worker instance as its Ansible host.
-          ansible_user: ubuntu
-          # Specifies the SSH user to use for connecting to the instance.
-          ansible_ssh_private_key_file: /home/ubuntu/ansible.pem
-          # Provides the path to the private key for SSH authentication.
-          groups: k3s_worker
-          # Adds this instance to the "k3s_worker" group for grouping purposes.
-      
-      
-      - name: Set up K3s master
-        # This block sets up the K3s Kubernetes master node.
-        hosts: k3s_master
-        # Targets the hosts in the "k3s_master" group.
-        vars:
-          ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
-          # Disables strict host key checking to avoid SSH connection prompts.
-        become: yes
-        # Allows tasks to be executed with elevated (sudo) privileges.
-        tasks:
-          - name: Update apt cache
-            # Updates the package index on the master node.
-            apt:
-              update_cache: yes
-              # Refreshes the local package cache.
-      
-          - name: Install k3s on master
-            # Installs the K3s lightweight Kubernetes distribution on the master node.
-            shell: curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 644
-            # Runs the K3s installation script.
-            args:
-              creates: /usr/local/bin/k3s
-              # This command only runs if K3s is not already installed.
-      
-          - name: Get k3s join token
-            # Retrieves the token needed for worker nodes to join the K3s cluster.
-            shell: cat /var/lib/rancher/k3s/server/node-token
-            # Reads the join token from the K3s server's file system.
-            register: k3s_token
-            # Stores the retrieved token in the 'k3s_token' variable.
-      
-          - name: Save k3s join token to local
-            # Saves the retrieved join token to the local machine for use by worker nodes.
-            local_action: copy content="{{ k3s_token.stdout }}" dest=./node-token
-            # Copies the token content to a local file named 'node-token'.
-      
-      - name: Set up K3s worker
-        # This block sets up the K3s Kubernetes worker node.
-        hosts: k3s_worker
-        # Targets the hosts in the "k3s_worker" group.
-        become: yes
-        # Allows tasks to be executed with elevated (sudo) privileges.
-        tasks:
-          - name: Copy k3s join token to worker
-            # Transfers the join token to the worker node.
-            copy:
-              src: ./node-token
-              # Specifies the local path to the token file.
-              dest: /tmp/node-token
-              # Defines the destination path on the worker node.
-      
-          - name: Install k3s on worker
-            # Installs K3s on the worker node and joins it to the master.
-            shell: curl -sfL https://get.k3s.io | K3S_URL=https://{{ hostvars['master']['ansible_host'] }}:6443 K3S_TOKEN=$(cat /tmp/node-token) sh -
-            # Runs the K3s installation script with the master's URL and join token.
-      
-      - name: Deploy React app on K3s
-        # This block handles deploying a React app on the K3s cluster.
-        hosts: k3s_master
-        # Specifies that this should run on the master node.
-        vars:
-          react_app_image: "sanjaysaini2000/react-app:latest"
-          # Defines the Docker image for the React app.
-      
-        tasks:
-          - name: Create deployment manifest for React app
-            # Generates a Kubernetes deployment manifest for the React app.
-            copy:
-              content: |
-                apiVersion: apps/v1
-                # API version of the Deployment object.
-                kind: Deployment
-                # Specifies the kind of Kubernetes resource.
-                metadata:
-                  name: react-app
-                  # Sets the name of the deployment.
-                  labels:
-                    app: react-app
-                    # Labels used to identify the app.
-                spec:
-                  replicas: 2
-                  # Number of app instances to run.
-                  selector:
-                    matchLabels:
+          hosts: localhost
+          gather_facts: False
+          tasks:
+            - name: Create VPC
+              amazon.aws.ec2_vpc_net:
+                name: k3s-vpc
+                cidr_block: 10.0.0.0/16
+                region: us-east-1
+              register: vpc
+        
+            - name: Create Internet Gateway for VPC
+              amazon.aws.ec2_vpc_igw:
+                vpc_id: "{{ vpc.vpc.id }}"
+                region: us-east-1
+                state: present
+              register: igw_info
+        
+            - name: Create subnet
+              amazon.aws.ec2_vpc_subnet:
+                vpc_id: "{{ vpc.vpc.id }}"
+                cidr: 10.0.1.0/24
+                az: us-east-1a
+                state: present
+                region: us-east-1
+                map_public: True
+                tags:
+                  Name: vpc-subnet
+              register: subnet
+        
+            - name: Create VPC Subnet Route Table
+              amazon.aws.ec2_vpc_route_table:
+                vpc_id: "{{ vpc.vpc.id }}"
+                region: us-east-1
+                state: present
+                subnets:
+                  - "{{ subnet.subnet.id }}"
+                tags:
+                  Name: route-table-for-subnet
+                routes:
+                  - dest: 0.0.0.0/0
+                    gateway_id: "{{ igw_info.gateway_id }}"
+        
+            - name: Create security group
+              amazon.aws.ec2_group:
+                name: k3s-sg
+                description: k3s security group
+                vpc_id: "{{ vpc.vpc.id }}"
+                region: us-east-1
+                rules:
+                  - proto: tcp
+                    ports:
+                      - 22  # SSH
+                    cidr_ip: 0.0.0.0/0
+                  - proto: tcp
+                    ports:
+                      - 80  # HTTP for any web server
+                    cidr_ip: 0.0.0.0/0
+                  - proto: tcp
+                    ports:
+                      - 8080  # General application port
+                    cidr_ip: 0.0.0.0/0
+                  - proto: tcp
+                    ports:
+                      - 6443  # Kubernetes API server
+                    cidr_ip: 0.0.0.0/0
+                  - proto: tcp
+                    ports:
+                      - 32000  # Grafana NodePort
+                    cidr_ip: 0.0.0.0/0
+                  - proto: tcp
+                    ports:
+                      - 30090  # Prometheus NodePort
+                    cidr_ip: 0.0.0.0/0
+                  - proto: tcp
+                    ports:
+                      - 30000  # React App NodePort
+                    cidr_ip: 0.0.0.0/0
+              register: security_group
+        
+            - name: Launch master instance
+              amazon.aws.ec2_instance:
+                key_name: ansible
+                instance_type: t2.medium
+                image_id: ami-0e001c9271cf7f3b9  # Replace with your AMI ID
+                wait: yes
+                count: 1
+                region: us-east-1
+                tags:
+                  Name: k3s-master
+                vpc_subnet_id: "{{ subnet.subnet.id }}"
+                security_groups:
+                  - "{{ security_group.group_id }}"
+              register: master_instance
+        
+            - name: Register the private IP of the master
+              set_fact:
+                master_private_ip: "{{ master_instance.instances[0].private_ip_address }}"
+        
+            # Debug task to confirm the private IP address
+            - name: Debug master's private IP
+              debug:
+                var: master_private_ip
+        
+            - name: Launch worker instance
+              amazon.aws.ec2_instance:
+                key_name: ansible
+                instance_type: t3.medium
+                image_id: ami-0e001c9271cf7f3b9  # Replace with your AMI ID
+                wait: yes
+                count: 1
+                region: us-east-1
+                tags:
+                  Name: k3s-worker
+                vpc_subnet_id: "{{ subnet.subnet.id }}"
+                security_groups:
+                  - "{{ security_group.group_id }}"
+              register: worker_instance
+        
+            - name: Debug master instance information
+              debug:
+                var: master_instance
+        
+            - name: Debug worker instance information
+              debug:
+                var: worker_instance
+        
+            - name: Wait for SSH to be available on master instance
+              wait_for:
+                host: "{{ master_instance.instances[0].public_ip_address | default(master_instance.instances[0].public_dns_name) }}"
+                port: 22
+                timeout: 300
+                delay: 10
+        
+            - name: Wait for SSH to be available on worker instance
+              wait_for:
+                host: "{{ worker_instance.instances[0].public_ip_address | default(worker_instance.instances[0].public_dns_name) }}"
+                port: 22
+                timeout: 300
+                delay: 10
+        
+            - name: Add master instance to inventory
+              add_host:
+                name: master
+                ansible_host: "{{ master_instance.instances[0].public_ip_address | default(master_instance.instances[0].public_dns_name) }}"
+                ansible_user: ubuntu
+                ansible_ssh_private_key_file: /home/ubuntu/ansible.pem
+                ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+                groups: k3s_master
+        
+            - name: Add worker instance to inventory
+              add_host:
+                name: worker
+                ansible_host: "{{ worker_instance.instances[0].public_ip_address | default(worker_instance.instances[0].public_dns_name) }}"
+                ansible_user: ubuntu
+                ansible_ssh_private_key_file: /home/ubuntu/ansible.pem
+                ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+                groups: k3s_worker
+            # Add the master_private_ip as a global variable accessible to worker setup
+            - name: Set master_private_ip globally
+              set_fact:
+                master_private_ip: "{{ master_instance.instances[0].private_ip_address }}"
+        
+        - name: Set up K3s master
+          hosts: k3s_master
+          vars:
+            ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+          become: yes
+          tasks:
+            - name: Update apt cache
+              apt:
+                update_cache: yes
+        
+            - name: Install k3s on master
+              shell: curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 644
+              args:
+                creates: /usr/local/bin/k3s
+        
+            - name: Get k3s join token
+              shell: cat /var/lib/rancher/k3s/server/node-token
+              register: k3s_token
+        
+            - name: Save k3s join token to local
+              local_action: copy content="{{ k3s_token.stdout }}" dest=./node-token
+        
+            - name: Ensure kubeconfig file has correct permissions for fetch
+              become: yes
+              shell: |
+                sudo cp /etc/rancher/k3s/k3s.yaml /home/ubuntu/k3s.yaml
+                sudo chown -R ubuntu:ubuntu /home/ubuntu/k3s.yaml
+                sudo chmod 644 /home/ubuntu/k3s.yaml
+        
+            - name: Fetch kubeconfig from master to local
+              fetch:
+                src: /home/ubuntu/k3s.yaml
+                dest: /tmp/k3s.yaml
+                flat: yes
+        
+        - name: Set up K3s worker
+          hosts: k3s_worker
+          become: yes
+          vars:
+            master_private_ip: "{{ hostvars['localhost']['master_private_ip'] }}"  # Access the global variable set previously
+          tasks:
+            - name: Disable UFW (Uncomplicated Firewall)
+              shell: |
+                sudo ufw disable || true
+        
+            - name: Copy k3s join token to worker
+              copy:
+                src: ./node-token
+                dest: /tmp/node-token
+        
+            - name: Copy kubeconfig to worker
+              copy:
+                src: /tmp/k3s.yaml
+                dest: /home/ubuntu/k3s.yaml
+                mode: '0644'
+        
+            - name: Update kubeconfig server URL to master node's private IP
+              become: yes
+              replace:
+                path: /home/ubuntu/k3s.yaml
+                regexp: 'https://127.0.0.1:6443'
+                replace: "https://{{ master_private_ip }}:6443"
+        
+            - name: Install k3s on worker
+              shell: curl -sfL https://get.k3s.io | K3S_URL=https://{{ master_private_ip }}:6443 K3S_TOKEN=$(cat /tmp/node-token) sh -
+        
+        - name: Deploy React app using DaemonSet on both master and worker nodes
+          hosts: k3s_worker:k3s_master
+          become: yes
+          vars:
+            react_app_image: "sanjaysaini2000/react-app:latest"
+          tasks:
+            - name: Create DaemonSet manifest for React app
+              copy:
+                content: |
+                  apiVersion: apps/v1
+                  kind: DaemonSet
+                  metadata:
+                    name: react-app
+                    labels:
                       app: react-app
-                      # Matches pods with this label.
-                  template:
-                    metadata:
-                      labels:
+                  spec:
+                    selector:
+                      matchLabels:
                         app: react-app
-                        # Labels for the pods created by the deployment.
-                    spec:
-                      containers:
-                      - name: react-app
-                        # Name of the container.
-                        image: "{{ react_app_image }}"
-                        # Specifies the Docker image to use.
-                        ports:
-                        - containerPort: 80
-                          # Port the container listens on.
-                        env:
-                        - name: NODE_ENV
-                          value: "production"
-                          # Sets an environment variable inside the container.
-              dest: /tmp/react-app-deployment.yml
-              # Path to save the deployment manifest file.
-      
-          - name: Apply deployment manifest for React app
-            # Uses `kubectl` to create or update the deployment in the cluster.
-            shell: kubectl apply -f /tmp/react-app-deployment.yml
-            args:
-              chdir: /tmp/
-              # Runs the command from the /tmp/ directory.
-      
-          - name: Create service manifest for React app
-            # Generates a Kubernetes service manifest to expose the React app.
-            copy:
-              content: |
-                apiVersion: v1
-                # API version of the Service object.
-                kind: Service
-                # Specifies the kind of Kubernetes resource.
-                metadata:
-                  name: react-app-service
-                  # Sets the name of the service.
-                spec:
-                  type: NodePort
-                  # Exposes the service on a static port.
-                  ports:
-                  - port: 80
-                    # The port the service listens on.
-                    targetPort: 80
-                    # The port forwarded to the app's container.
-                    nodePort: 30000
-                    # Static port on the node to access the service.
-                  selector:
-                    app: react-app
-                    # Selects pods with this label.
-              dest: /tmp/react-app-service.yml
-              # Path to save the service manifest file.
-      
-          - name: Apply service manifest for React app
-            # Uses `kubectl` to create or update the service in the cluster.
-            shell: kubectl apply -f /tmp/react-app-service.yml
-            args:
-              chdir: /tmp/
-              # Runs the command from the /tmp/ directory.
-      
-      - name: Deploy Prometheus and Grafana using Helm
-        # This section sets up Prometheus and Grafana on the K3s cluster using Helm.
-        hosts: k3s_master
-        # Specifies that these tasks run on the master node.
-        become: yes
-        # Executes tasks with elevated privileges.
-      
-        tasks:
-          - name: Disable UFW (Uncomplicated Firewall)
-            # Disables the firewall to ensure no network issues during setup.
-            shell: |
-              sudo ufw disable || true
-              # Disables UFW; if already disabled, ignores errors.
-      
-          - name: Install Helm if not already installed
-            # Checks if Helm is installed, and installs it if not.
-            shell: |
-              if ! command -v helm &> /dev/null; then
-                curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
-                # Downloads and installs Helm v3.
-              fi
-      
-          - name: Add Helm repo and update
-            # Adds Helm repositories for Prometheus and Grafana, then updates the repo list.
-            shell: |
-              helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-              # Adds the Prometheus community chart repo.
-              helm repo add grafana https://grafana.github.io/helm-charts
-              # Adds the Grafana chart repo.
-              helm repo update
-              # Updates Helm repo information.
-      
-          - name: Create namespace for monitoring
-            # Creates a Kubernetes namespace named 'monitoring'.
-            shell: kubectl create namespace monitoring || true
-            # If the namespace already exists, the error is ignored.
-      
-          - name: Install Prometheus using Helm
-            # Installs Prometheus in the 'monitoring' namespace using Helm.
-            shell: |
-              export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-              # Sets the KUBECONFIG to use K3s config.
-              helm install prometheus prometheus-community/kube-prometheus-stack --namespace monitoring --wait --timeout 10m
-              # Deploys Prometheus using the Helm chart, waits for it to be ready.
-      
-          - name: Install Grafana using Helm with increased timeout
-        # Task name describing the action: Installing Grafana via Helm with extended timeout.
-        shell: |
-          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-          helm install grafana grafana/grafana --namespace monitoring --set adminPassword=admin --timeout 10m --wait
-          # Shell command to set KUBECONFIG environment variable and install Grafana using Helm.
-          # - `export KUBECONFIG`: Sets the Kubernetes configuration file path.
-          # - `helm install grafana ...`: Installs Grafana in the 'monitoring' namespace with a specific admin password and timeout.
-      
-      - name: Patch Prometheus service to NodePort
-        # Task name: Changing Prometheus service type to NodePort for external access.
-        shell: |
-          kubectl patch svc prometheus-kube-prometheus-prometheus -n monitoring -p '{"spec": {"type": "NodePort", "ports": [{"port": 9090, "targetPort": 9090, "nodePort": 30090}]}}'
-          # Shell command to patch Prometheus service to NodePort for external access on port 30090.
-          # - `kubectl patch svc`: Kubernetes command to patch (modify) a service.
-          # - `-p '{"spec": ...}'`: Specifies the JSON payload for the patch operation.
-      
-      - name: Patch Grafana service to NodePort
-        # Task name: Changing Grafana service type to NodePort for external access.
-        shell: |
-          kubectl patch svc grafana -n monitoring -p '{"spec": {"type": "NodePort", "ports": [{"port": 80, "targetPort": 3000, "nodePort": 32000}]}}'
-          # Shell command to patch Grafana service to NodePort for external access on port 32000.
-          # - `kubectl patch svc`: Kubernetes command to patch (modify) a service.
-          # - `-p '{"spec": ...}'`: Specifies the JSON payload for the patch operation.
-      
-      - name: Check Prometheus Pods status
-        # Task name: Checking status of Prometheus pods.
-        shell: kubectl get pods -n monitoring -l app.kubernetes.io/name=kube-prometheus-stack -o jsonpath='{.items[*].status.phase}'
-        register: prometheus_pod_status
-        # Shell command to retrieve Prometheus pod status and register it as a variable.
-        # - `kubectl get pods`: Kubernetes command to list pods.
-        # - `-n monitoring`: Specifies the namespace 'monitoring'.
-        # - `-l app.kubernetes.io/name=kube-prometheus-stack`: Labels to filter pods by.
-        # - `-o jsonpath='{.items[*].status.phase}'`: Formats output using JSONPath to get pod phase (e.g., Running).
-      
-      - name: Print Prometheus Pods status
-        # Task name: Printing Prometheus pod status.
-        debug:
-          msg: "Prometheus Pods status: {{ prometheus_pod_status.stdout }}"
-        # Debug module to print the status of Prometheus pods.
-        # - `msg`: Message to display.
-        # - `prometheus_pod_status.stdout`: Accesses the stdout from the previous task's output.
-      
-      - name: Get detailed status of Prometheus pods
-        # Task name: Retrieving detailed information about Prometheus pods.
-        shell: kubectl get pods -n monitoring -l app.kubernetes.io/name=kube-prometheus-stack -o wide
-        register: prometheus_pods_detail
-        # Shell command to list Prometheus pods with wide output format and register the result.
-        # - `-o wide`: Outputs additional information such as node name and IP address.
-      
-      - name: Print detailed status of Prometheus pods
-        # Task name: Printing detailed information about Prometheus pods.
-        debug:
-          msg: "{{ prometheus_pods_detail.stdout_lines }}"
-        # Debug module to print the detailed status of Prometheus pods.
-        # - `msg`: Message to display.
-        # - `prometheus_pods_detail.stdout_lines`: Accesses the stdout lines from the previous task's output.
-      
-      - name: Get Prometheus pod logs (if any pod is not running)
-        # Task name: Retrieving logs from Prometheus pods if any are not running.
-        shell: kubectl logs -n monitoring -l app.kubernetes.io/name=kube-prometheus-stack --tail=100
-        register: prometheus_pods_logs
-        when: "'Running' not in prometheus_pod_status.stdout"
-        # Shell command to retrieve logs from Prometheus pods based on conditions, registers the result if the condition is met.
-        # - `kubectl logs`: Retrieves logs from pods.
-        # - `--tail=100`: Retrieves last 100 lines of logs.
-        # - `when`: Conditional execution based on the previous task's output.
-      
-      - name: Print Prometheus pod logs
-        # Task name: Printing Prometheus pod logs.
-        debug:
-          msg: "{{ prometheus_pods_logs.stdout_lines }}"
-        when: "'Running' not in prometheus_pod_status.stdout"
-        # Debug module to print Prometheus pod logs if the pods are not running.
-        # - `msg`: Message to display.
-        # - `prometheus_pods_logs.stdout_lines`: Accesses the stdout lines from the previous task's output.
-      
-      - name: Get events in monitoring namespace
-        # Task name: Retrieving events from the 'monitoring' namespace.
-        shell: kubectl get events -n monitoring --sort-by='.lastTimestamp'
-        register: monitoring_namespace_events
-        # Shell command to retrieve events from the 'monitoring' namespace and register the result.
-        # - `--sort-by='.lastTimestamp'`: Sorts events by their last timestamp.
-      
-      - name: Print events in monitoring namespace
-        # Task name: Printing events from the 'monitoring' namespace.
-        debug:
-          msg: "{{ monitoring_namespace_events.stdout_lines }}"
-        # Debug module to print events from the 'monitoring' namespace.
-        # - `msg`: Message to display.
-        # - `monitoring_namespace_events.stdout_lines`: Accesses the stdout lines from the previous task's output.
-      
-      - name: Verify Grafana Pods are running
-        # Task name: Checking status of Grafana pods.
-        shell: kubectl get pods -n monitoring -l app.kubernetes.io/name=grafana -o jsonpath='{.items[*].status.phase}'
-        register: grafana_pod_status
-        # Shell command to retrieve Grafana pod status and register it as a variable.
-        # - `kubectl get pods`: Kubernetes command to list pods.
-        # - `-n monitoring`: Specifies the namespace 'monitoring'.
-        # - `-l app.kubernetes.io/name=grafana`: Labels to filter pods by.
-      
-      - name: Print Grafana Pods status
-        # Task name: Printing Grafana pod status.
-        debug:
-          msg: "Grafana Pods status: {{ grafana_pod_status.stdout }}"
-        # Debug module to print the status of Grafana pods.
-        # - `msg`: Message to display.
-        # - `grafana_pod_status.stdout`: Accesses the stdout from the previous task's output.
-      
-      - name: Get Grafana admin password
-        # Task name: Retrieving Grafana admin password from Kubernetes secret.
-        shell: kubectl get secret --namespace monitoring grafana -o jsonpath="{.data.admin-password}" | base64 --decode
-        register: grafana_admin_password
-        # Shell command to retrieve and decode the Grafana admin password from a Kubernetes secret.
-        # - `-o jsonpath="{.data.admin-password}"`: Extracts the admin password field from the secret in JSON format.
-        # - `| base64 --decode`: Decodes the Base64-encoded password.
-      
-      - name: Print Grafana admin password
-        # Task name: Printing Grafana admin password.
-        debug:
-          msg: "Grafana admin password is: {{ grafana_admin_password.stdout }}"
-        # Debug module to print the Grafana admin password.
-        # - `msg`: Message to display.
-        # - `grafana_admin_password.stdout`: Accesses the decoded admin password from the previous task's output.
-      
-      - name: Get Grafana service NodePort
-        # Task name: Retrieving NodePort for Grafana service.
-        shell: kubectl get svc -n monitoring grafana -o jsonpath='{.spec.ports[0].nodePort}'
-        register: grafana_node_port
-        # Shell command to retrieve the NodePort where Grafana service is exposed and register the result.
-        # - `kubectl get svc`: Retrieves service details.
-        # - `-n monitoring`: Specifies the namespace 'monitoring'.
-        # - `grafana -o jsonpath='{.spec.ports[0].nodePort}'`: Uses JSONPath to extract the NodePort value.
-      
-      - name: Print Grafana access information
-        # Task name: Printing access information for Grafana.
-        debug:
-             msg: "Grafana is accessible at: http://{{ ansible_host }}:{{ grafana_node_port.stdout }} with username 'admin' and password '{{ grafana_admin_password.stdout }}'"
-           # Debug module to print the URL and login details for accessing Grafana.
-           # - `msg`: Message to display.
-           # - `ansible_host`: Hostname where Ansible is running.
-           # - `grafana_node_port.stdout`: Accesses the NodePort value from the previous task's output.
-           # - `grafana_admin_password.stdout`: Accesses the Grafana admin password from the previous task's output.
+                    template:
+                      metadata:
+                        labels:
+                          app: react-app
+                      spec:
+                        containers:
+                        - name: react-app
+                          image: "{{ react_app_image }}"
+                          ports:
+                          - containerPort: 80
+                            name: http
+                            protocol: TCP
+                          env:
+                          - name: NODE_ENV
+                            value: "production"
+                dest: /tmp/react-app-daemonset.yml
+        
+            - name: Apply DaemonSet manifest for React app
+              shell: |
+                export KUBECONFIG=/home/ubuntu/k3s.yaml
+                KUBERNETES_SKIP_TLS_VERIFY=true kubectl apply -f /tmp/react-app-daemonset.yml --validate=false
+              environment:
+                KUBECONFIG: /home/ubuntu/k3s.yaml
+        
+            - name: Create service manifest for React app
+              copy:
+                content: |
+                  apiVersion: v1
+                  kind: Service
+                  metadata:
+                    name: react-app-service
+                  spec:
+                    type: NodePort
+                    ports:
+                    - port: 80
+                      targetPort: http
+                      nodePort: 30000
+                    selector:
+                      app: react-app
+                dest: /tmp/react-app-service.yml
+        
+            - name: Apply service manifest for React app
+              shell: |
+                export KUBECONFIG=/home/ubuntu/k3s.yaml
+                kubectl apply -f /tmp/react-app-service.yml --validate=false
+              environment:
+                KUBECONFIG: /home/ubuntu/k3s.yaml
+        
+            - name: Verify the DaemonSet is running
+              shell: |
+                export KUBECONFIG=/home/ubuntu/k3s.yaml
+                kubectl get daemonsets react-app -o wide
+              register: ds_status
+        
+            - name: Print DaemonSet status
+              debug:
+                var: ds_status.stdout
+              when: ds_status is defined
+        - name: Install Prometheus and Grafana using Helm with pre-configured dashboards
+          hosts: k3s_master
+          become: yes
+          tasks:
+            - name: Install Helm if not already installed
+              shell: |
+                if ! command -v helm &> /dev/null; then
+                  curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
+                fi
+        
+            - name: Add Helm repositories and update
+              shell: |
+                helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+                helm repo add grafana https://grafana.github.io/helm-charts
+                helm repo update
+        
+            - name: Create namespace for monitoring
+              shell: kubectl create namespace monitoring || true
+        
+            - name: Install kube-prometheus-stack using Helm
+              shell: |
+                export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+                helm install prometheus-stack prometheus-community/kube-prometheus-stack --namespace monitoring --wait --timeout 10m \
+                --set grafana.adminPassword=admin \
+                --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+                --set grafana.service.type=NodePort \
+                --set grafana.service.nodePort=32000
+        
+        
+            - name: Create Grafana provisioning configmap YAML
+              copy:
+                content: |
+                  apiVersion: v1
+                  kind: ConfigMap
+                  metadata:
+                    name: grafana-provisioning
+                    namespace: monitoring
+                  data:
+                    grafana-datasource.yaml: |
+                      apiVersion: 1
+                      datasources:
+                        - name: Prometheus
+                          type: prometheus
+                          access: proxy
+                          url: http://prometheus-stack-kube-prometheus-prometheus.monitoring.svc:9090
+                          isDefault: true
+                    grafana-dashboards.yaml: |
+                      apiVersion: 1
+                      providers:
+                        - name: 'default'
+                          orgId: 1
+                          folder: ''
+                          type: file
+                          options:
+                            path: /var/lib/grafana/dashboards
+                dest: /tmp/grafana-provisioning-configmap.yaml
+        
+            - name: Apply Grafana provisioning configmap
+              shell: kubectl apply -f /tmp/grafana-provisioning-configmap.yaml
+        
+            - name: Create ConfigMap for Grafana dashboards
+              copy:
+                content: |
+                  apiVersion: v1
+                  kind: ConfigMap
+                  metadata:
+                    name: grafana-dashboards
+                    namespace: monitoring
+                  data:
+                    kubernetes-cluster-overview.json: |
+                      {
+                        "annotations": {
+                          "list": [
+                            {
+                              "builtIn": 1,
+                              "datasource": "-- Grafana --",
+                              "enable": true,
+                              "hide": true,
+                              "iconColor": "rgba(0, 211, 255, 1)",
+                              "name": "Annotations & Alerts",
+                              "type": "dashboard"
+                            }
+                          ]
+                        },
+                        "editable": true,
+                        "gnetId": null,
+                        "graphTooltip": 0,
+                        "id": null,
+                        "iteration": 1618369811918,
+                        "links": [],
+                        "panels": [
+                          {
+                            "datasource": "Prometheus",
+                            "fieldConfig": {
+                              "defaults": {
+                                "custom": {}
+                              },
+                              "overrides": []
+                            },
+                            "gridPos": {
+                              "h": 9,
+                              "w": 12,
+                              "x": 0,
+                              "y": 0
+                            },
+                            "id": 1,
+                            "options": {
+                              "showThresholdLabels": false,
+                              "showThresholdMarkers": true
+                            },
+                            "targets": [
+                              {
+                                "expr": "sum(rate(container_cpu_usage_seconds_total[5m])) by (instance)",
+                                "interval": "",
+                                "legendFormat": "{{ '{{' }} instance {{ '}}' }}",
+                                "refId": "A"
+                              }
+                            ],
+                            "title": "CPU Usage",
+                            "type": "timeseries"
+                          },
+                          {
+                            "datasource": "Prometheus",
+                            "fieldConfig": {
+                              "defaults": {
+                                "custom": {}
+                              },
+                              "overrides": []
+                            },
+                            "gridPos": {
+                              "h": 9,
+                              "w": 12,
+                              "x": 12,
+                              "y": 0
+                            },
+                            "id": 2,
+                            "options": {
+                              "showThresholdLabels": false,
+                              "showThresholdMarkers": true
+                            },
+                            "targets": [
+                              {
+                                "expr": "sum(container_memory_usage_bytes) by (instance)",
+                                "interval": "",
+                                "legendFormat": "{{ '{{' }} instance {{ '}}' }}",
+                                "refId": "A"
+                              }
+                            ],
+                            "title": "Memory Usage",
+                            "type": "timeseries"
+                          }
+                        ],
+                        "refresh": "5s",
+                        "schemaVersion": 27,
+                        "style": "dark",
+                        "tags": [],
+                        "templating": {
+                          "list": []
+                        },
+                        "time": {
+                          "from": "now-5m",
+                          "to": "now"
+                        },
+                        "timepicker": {
+                          "refresh_intervals": [
+                            "5s",
+                            "10s",
+                            "30s",
+                            "1m",
+                            "5m",
+                            "15m",
+                            "30m",
+                            "1h",
+                            "2h",
+                            "1d"
+                          ],
+                          "time_options": [
+                            "5m",
+                            "15m",
+                            "1h",
+                            "6h",
+                            "12h",
+                            "24h",
+                            "2d",
+                            "7d",
+                            "30d"
+                          ]
+                        },
+                        "timezone": "",
+                        "title": "Kubernetes Cluster Overview",
+                        "version": 1
+                      }
+                dest: /tmp/grafana-dashboards-configmap.yaml
+        
+            - name: Apply Grafana dashboards configmap
+              shell: kubectl apply -f /tmp/grafana-dashboards-configmap.yaml
+        
+            - name: Mount Grafana provisioning and dashboards ConfigMaps
+              shell: |
+                kubectl patch deployment prometheus-stack-grafana -n monitoring --patch '{
+                  "spec": {
+                    "template": {
+                      "spec": {
+                        "volumes": [
+                          {
+                            "name": "grafana-provisioning",
+                            "configMap": {
+                              "name": "grafana-provisioning"
+                            }
+                          },
+                          {
+                            "name": "grafana-dashboards",
+                            "configMap": {
+                              "name": "grafana-dashboards"
+                            }
+                          }
+                        ],
+                        "containers": [
+                          {
+                            "name": "grafana",
+                            "volumeMounts": [
+                              {
+                                "name": "grafana-provisioning",
+                                "mountPath": "/etc/grafana/provisioning"
+                              },
+                              {
+                                "name": "grafana-dashboards",
+                                "mountPath": "/var/lib/grafana/dashboards",
+                                "subPath": "kubernetes-cluster-overview.json"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }'
+        
+            - name: Restart Grafana to apply provisioning
+              shell: kubectl rollout restart deployment prometheus-stack-grafana -n monitoring
+        
+            - name: Print Grafana access information
+              debug:
+                msg: "Grafana is accessible at: http://{{ hostvars['master']['ansible_host'] }}:32000 with username 'admin' and password 'admin'"
+        
+            - name: Print Prometheus access information
+              debug:
+                msg: "Prometheus is accessible within the cluster at: http://prometheus-stack-kube-prometheus-prometheus.monitoring.svc:9090"
      ```
 ### **Run below command to execute the inventory-**
 ```
