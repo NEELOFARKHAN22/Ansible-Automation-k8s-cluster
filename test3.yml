@@ -94,6 +94,15 @@
           - "{{ security_group.group_id }}"
       register: master_instance
 
+    - name: Register the private IP of the master
+      set_fact:
+        master_private_ip: "{{ master_instance.instances[0].private_ip_address }}"
+
+    # Debug task to confirm the private IP address
+    - name: Debug master's private IP
+      debug:
+        var: master_private_ip
+
     - name: Launch worker instance
       amazon.aws.ec2_instance:
         key_name: ansible
@@ -148,47 +157,80 @@
         ansible_ssh_private_key_file: /home/ubuntu/ansible.pem
         ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
         groups: k3s_worker
+    # Add the master_private_ip as a global variable accessible to worker setup
+    - name: Set master_private_ip globally
+      set_fact:
+        master_private_ip: "{{ master_instance.instances[0].private_ip_address }}"
 
-- name: Set up K3s master and worker nodes
-  hosts: k3s_master:k3s_worker
-  become: yes
+- name: Set up K3s master
+  hosts: k3s_master
   vars:
     ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+  become: yes
   tasks:
     - name: Update apt cache
       apt:
         update_cache: yes
 
-    - name: Install k3s on master and worker nodes
-      shell: curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--write-kubeconfig-mode 644" sh -
+    - name: Install k3s on master
+      shell: curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 644
       args:
         creates: /usr/local/bin/k3s
 
     - name: Get k3s join token
       shell: cat /var/lib/rancher/k3s/server/node-token
-      when: inventory_hostname == "master"
       register: k3s_token
-      ignore_errors: yes  # Ignore errors to prevent playbook failure
 
     - name: Save k3s join token to local
-      local_action:
-        module: copy
-        content: "{{ k3s_token.stdout }}"
-        dest: ./node-token
-      when: k3s_token is defined and k3s_token.stdout is defined
+      local_action: copy content="{{ k3s_token.stdout }}" dest=./node-token
 
-    - name: Copy k3s join token to worker nodes
+    - name: Ensure kubeconfig file has correct permissions for fetch
+      become: yes
+      shell: |
+        sudo cp /etc/rancher/k3s/k3s.yaml /home/ubuntu/k3s.yaml
+        sudo chown -R ubuntu:ubuntu /home/ubuntu/k3s.yaml
+        sudo chmod 644 /home/ubuntu/k3s.yaml
+
+    - name: Fetch kubeconfig from master to local
+      fetch:
+        src: /home/ubuntu/k3s.yaml
+        dest: /tmp/k3s.yaml
+        flat: yes
+
+- name: Set up K3s worker
+  hosts: k3s_worker
+  become: yes
+  vars:
+    master_private_ip: "{{ hostvars['localhost']['master_private_ip'] }}"  # Access the global variable set previously
+  tasks:
+    - name: Disable UFW (Uncomplicated Firewall)
+      shell: |
+        sudo ufw disable || true
+
+    - name: Copy k3s join token to worker
       copy:
         src: ./node-token
         dest: /tmp/node-token
-      when: inventory_hostname == "worker" and k3s_token.stdout is defined
 
-    - name: Join worker nodes to the master
-      shell: curl -sfL https://get.k3s.io | K3S_URL=https://{{ hostvars['master']['ansible_host'] }}:6443 K3S_TOKEN=$(cat /tmp/node-token) sh -
-      when: inventory_hostname == "worker" and k3s_token.stdout is defined
+    - name: Copy kubeconfig to worker
+      copy:
+        src: /tmp/k3s.yaml
+        dest: /home/ubuntu/k3s.yaml
+        mode: '0644'
+
+    - name: Update kubeconfig server URL to master node's private IP
+      become: yes
+      replace:
+        path: /home/ubuntu/k3s.yaml
+        regexp: 'https://127.0.0.1:6443'
+        replace: "https://{{ master_private_ip }}:6443"
+
+    - name: Install k3s on worker
+      shell: curl -sfL https://get.k3s.io | K3S_URL=https://{{ master_private_ip }}:6443 K3S_TOKEN=$(cat /tmp/node-token) sh -
 
 - name: Deploy React app using DaemonSet on both master and worker nodes
-  hosts: k3s_master:k3s_worker
+  hosts: k3s_worker:k3s_master
+  become: yes
   vars:
     react_app_image: "sanjaysaini2000/react-app:latest"
   tasks:
@@ -223,9 +265,11 @@
         dest: /tmp/react-app-daemonset.yml
 
     - name: Apply DaemonSet manifest for React app
-      shell: kubectl apply -f /tmp/react-app-daemonset.yml
-      args:
-        chdir: /tmp/
+      shell: |
+        export KUBECONFIG=/home/ubuntu/k3s.yaml
+        KUBERNETES_SKIP_TLS_VERIFY=true kubectl apply -f /tmp/react-app-daemonset.yml --validate=false
+      environment:
+        KUBECONFIG: /home/ubuntu/k3s.yaml
 
     - name: Create service manifest for React app
       copy:
@@ -245,6 +289,267 @@
         dest: /tmp/react-app-service.yml
 
     - name: Apply service manifest for React app
-      shell: kubectl apply -f /tmp/react-app-service.yml
-      args:
-        chdir: /tmp/
+      shell: |
+        export KUBECONFIG=/home/ubuntu/k3s.yaml
+        kubectl apply -f /tmp/react-app-service.yml --validate=false
+      environment:
+        KUBECONFIG: /home/ubuntu/k3s.yaml
+
+    - name: Verify the DaemonSet is running
+      shell: |
+        export KUBECONFIG=/home/ubuntu/k3s.yaml
+        kubectl get daemonsets react-app -o wide
+      register: ds_status
+
+    - name: Print DaemonSet status
+      debug:
+        var: ds_status.stdout
+      when: ds_status is defined
+- name: Install Prometheus and Grafana using Helm with pre-configured dashboards
+  hosts: k3s_master
+  become: yes
+  tasks:
+    - name: Install Helm if not already installed
+      shell: |
+        if ! command -v helm &> /dev/null; then
+          curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
+        fi
+
+    - name: Add Helm repositories and update
+      shell: |
+        helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+        helm repo add grafana https://grafana.github.io/helm-charts
+        helm repo update
+
+    - name: Create namespace for monitoring
+      shell: kubectl create namespace monitoring || true
+
+    - name: Install kube-prometheus-stack using Helm
+      shell: |
+        export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+        helm install prometheus-stack prometheus-community/kube-prometheus-stack --namespace monitoring --wait --timeout 10m \
+        --set grafana.adminPassword=admin \
+        --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+        --set grafana.service.type=NodePort \
+        --set grafana.service.nodePort=32000
+
+
+    - name: Create Grafana provisioning configmap YAML
+      copy:
+        content: |
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: grafana-provisioning
+            namespace: monitoring
+          data:
+            grafana-datasource.yaml: |
+              apiVersion: 1
+              datasources:
+                - name: Prometheus
+                  type: prometheus
+                  access: proxy
+                  url: http://prometheus-stack-kube-prometheus-prometheus.monitoring.svc:9090
+                  isDefault: true
+            grafana-dashboards.yaml: |
+              apiVersion: 1
+              providers:
+                - name: 'default'
+                  orgId: 1
+                  folder: ''
+                  type: file
+                  options:
+                    path: /var/lib/grafana/dashboards
+        dest: /tmp/grafana-provisioning-configmap.yaml
+
+    - name: Apply Grafana provisioning configmap
+      shell: kubectl apply -f /tmp/grafana-provisioning-configmap.yaml
+
+    - name: Create ConfigMap for Grafana dashboards
+      copy:
+        content: |
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: grafana-dashboards
+            namespace: monitoring
+          data:
+            kubernetes-cluster-overview.json: |
+              {
+                "annotations": {
+                  "list": [
+                    {
+                      "builtIn": 1,
+                      "datasource": "-- Grafana --",
+                      "enable": true,
+                      "hide": true,
+                      "iconColor": "rgba(0, 211, 255, 1)",
+                      "name": "Annotations & Alerts",
+                      "type": "dashboard"
+                    }
+                  ]
+                },
+                "editable": true,
+                "gnetId": null,
+                "graphTooltip": 0,
+                "id": null,
+                "iteration": 1618369811918,
+                "links": [],
+                "panels": [
+                  {
+                    "datasource": "Prometheus",
+                    "fieldConfig": {
+                      "defaults": {
+                        "custom": {}
+                      },
+                      "overrides": []
+                    },
+                    "gridPos": {
+                      "h": 9,
+                      "w": 12,
+                      "x": 0,
+                      "y": 0
+                    },
+                    "id": 1,
+                    "options": {
+                      "showThresholdLabels": false,
+                      "showThresholdMarkers": true
+                    },
+                    "targets": [
+                      {
+                        "expr": "sum(rate(container_cpu_usage_seconds_total[5m])) by (instance)",
+                        "interval": "",
+                        "legendFormat": "{{ '{{' }} instance {{ '}}' }}",
+                        "refId": "A"
+                      }
+                    ],
+                    "title": "CPU Usage",
+                    "type": "timeseries"
+                  },
+                  {
+                    "datasource": "Prometheus",
+                    "fieldConfig": {
+                      "defaults": {
+                        "custom": {}
+                      },
+                      "overrides": []
+                    },
+                    "gridPos": {
+                      "h": 9,
+                      "w": 12,
+                      "x": 12,
+                      "y": 0
+                    },
+                    "id": 2,
+                    "options": {
+                      "showThresholdLabels": false,
+                      "showThresholdMarkers": true
+                    },
+                    "targets": [
+                      {
+                        "expr": "sum(container_memory_usage_bytes) by (instance)",
+                        "interval": "",
+                        "legendFormat": "{{ '{{' }} instance {{ '}}' }}",
+                        "refId": "A"
+                      }
+                    ],
+                    "title": "Memory Usage",
+                    "type": "timeseries"
+                  }
+                ],
+                "refresh": "5s",
+                "schemaVersion": 27,
+                "style": "dark",
+                "tags": [],
+                "templating": {
+                  "list": []
+                },
+                "time": {
+                  "from": "now-5m",
+                  "to": "now"
+                },
+                "timepicker": {
+                  "refresh_intervals": [
+                    "5s",
+                    "10s",
+                    "30s",
+                    "1m",
+                    "5m",
+                    "15m",
+                    "30m",
+                    "1h",
+                    "2h",
+                    "1d"
+                  ],
+                  "time_options": [
+                    "5m",
+                    "15m",
+                    "1h",
+                    "6h",
+                    "12h",
+                    "24h",
+                    "2d",
+                    "7d",
+                    "30d"
+                  ]
+                },
+                "timezone": "",
+                "title": "Kubernetes Cluster Overview",
+                "version": 1
+              }
+        dest: /tmp/grafana-dashboards-configmap.yaml
+
+    - name: Apply Grafana dashboards configmap
+      shell: kubectl apply -f /tmp/grafana-dashboards-configmap.yaml
+
+    - name: Mount Grafana provisioning and dashboards ConfigMaps
+      shell: |
+        kubectl patch deployment prometheus-stack-grafana -n monitoring --patch '{
+          "spec": {
+            "template": {
+              "spec": {
+                "volumes": [
+                  {
+                    "name": "grafana-provisioning",
+                    "configMap": {
+                      "name": "grafana-provisioning"
+                    }
+                  },
+                  {
+                    "name": "grafana-dashboards",
+                    "configMap": {
+                      "name": "grafana-dashboards"
+                    }
+                  }
+                ],
+                "containers": [
+                  {
+                    "name": "grafana",
+                    "volumeMounts": [
+                      {
+                        "name": "grafana-provisioning",
+                        "mountPath": "/etc/grafana/provisioning"
+                      },
+                      {
+                        "name": "grafana-dashboards",
+                        "mountPath": "/var/lib/grafana/dashboards",
+                        "subPath": "kubernetes-cluster-overview.json"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }'
+
+    - name: Restart Grafana to apply provisioning
+      shell: kubectl rollout restart deployment prometheus-stack-grafana -n monitoring
+
+    - name: Print Grafana access information
+      debug:
+        msg: "Grafana is accessible at: http://{{ hostvars['master']['ansible_host'] }}:32000 with username 'admin' and password 'admin'"
+
+    - name: Print Prometheus access information
+      debug:
+        msg: "Prometheus is accessible within the cluster at: http://prometheus-stack-kube-prometheus-prometheus.monitoring.svc:9090"
