@@ -50,32 +50,7 @@
         region: us-east-1
         rules:
           - proto: tcp
-            ports:
-              - 22  # SSH
-            cidr_ip: 0.0.0.0/0
-          - proto: tcp
-            ports:
-              - 80  # HTTP for any web server
-            cidr_ip: 0.0.0.0/0
-          - proto: tcp
-            ports:
-              - 8080  # General application port
-            cidr_ip: 0.0.0.0/0
-          - proto: tcp
-            ports:
-              - 6443  # Kubernetes API server
-            cidr_ip: 0.0.0.0/0
-          - proto: tcp
-            ports:
-              - 32000  # Grafana NodePort
-            cidr_ip: 0.0.0.0/0
-          - proto: tcp
-            ports:
-              - 30090  # Prometheus NodePort
-            cidr_ip: 0.0.0.0/0
-          - proto: tcp
-            ports:
-              - 30000  # React App NodePort
+            ports: [22, 80, 8080, 6443, 32000, 9090, 30000]
             cidr_ip: 0.0.0.0/0
       register: security_group
 
