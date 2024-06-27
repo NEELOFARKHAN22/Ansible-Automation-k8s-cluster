@@ -1992,3 +1992,4 @@ To access Grafana and Prometheus:
 - **Prometheus:**
   - Collects metrics from Kubernetes components and applications.
   - Use Prometheus queries to monitor and analyze metrics data.
+##[Attach a Load Balancer to Your Auto Scaling Group](https://docs.aws.amazon.com/autoscaling/ec2/userguide/attach-load-balancer-asg.html)
