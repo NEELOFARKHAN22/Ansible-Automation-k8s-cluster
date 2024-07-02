@@ -50,14 +50,39 @@
         region: us-east-1
         rules:
           - proto: tcp
-            ports: [22, 80, 8080, 6443, 32000, 9090, 30000]
+            ports:
+              - 22  # SSH
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            ports:
+              - 80  # HTTP for any web server
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            ports:
+              - 8080  # General application port
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            ports:
+              - 6443  # Kubernetes API server
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            ports:
+              - 32000  # Grafana NodePort
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            ports:
+              - 9090  # Prometheus NodePort
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            ports:
+              - 30004  # React App NodePort
             cidr_ip: 0.0.0.0/0
       register: security_group
 
     - name: Launch master instance
       amazon.aws.ec2_instance:
         key_name: ansible
-        instance_type: t2.medium
+        instance_type: t2.small
         image_id: ami-0e001c9271cf7f3b9  # Replace with your AMI ID
         wait: yes
         count: 1
@@ -81,7 +106,7 @@
     - name: Launch worker instance
       amazon.aws.ec2_instance:
         key_name: ansible
-        instance_type: t3.medium
+        instance_type: t2.small
         image_id: ami-0e001c9271cf7f3b9  # Replace with your AMI ID
         wait: yes
         count: 1
@@ -258,7 +283,7 @@
             ports:
             - port: 80
               targetPort: http
-              nodePort: 30000
+              nodePort: 30044
             selector:
               app: react-app
         dest: /tmp/react-app-service.yml
